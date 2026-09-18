@@ -6,6 +6,7 @@ import {
   validateManualAddress,
 } from '../src/lib/hosts'
 import { buildDnsmasqLeases, dnsmasqLeasesText } from '../src/lib/dnsmasq'
+import { buildOption121, encodeRoute, resolveClientSegment } from '../src/lib/option121'
 import { checkMac, normalizeMacInput } from '../src/lib/mac'
 import { buildExportJson } from '../src/lib/exporter'
 import { intToIp, ipToInt, prefixForHosts } from '../src/lib/ip'
@@ -935,6 +936,230 @@ check('重复 MAC 仅最早一条输出，另一条列入排除并说明重复',
 
 // 17f) MAC 数据不进入 JSON 导出
 check('导出 JSON 不含 MAC 字段', !/dhcp-host|mac地址|MAC地址/.test(exportJson) && !/"mac"/.test(buildExportJson(hostPlan, { parentCidr: demo.parentCidr })))
+
+// ========== 18) DHCP Option 121（RFC 3442） ==========
+// 演示规划：q4=192.168.10.16/30（.17/.18），q1=128/25，q2=64/26，q3=32/27
+// 18a) encodeRoute：RFC 3442 逐字节编码
+// /24 目的 192.168.1.0，网关 192.168.10.17 -> 24,192,168,1,192,168,10,17（8 字节）
+check(
+  '/24 编码：前缀 + 3 个目的字节 + 4 个下一跳字节',
+  JSON.stringify(encodeRoute(ipToInt('192.168.1.0'), 24, ipToInt('192.168.10.17'))) ===
+    JSON.stringify([24, 192, 168, 1, 192, 168, 10, 17]),
+  JSON.stringify(encodeRoute(ipToInt('192.168.1.0'), 24, ipToInt('192.168.10.17'))),
+)
+// /0 目的 0.0.0.0 不写任何目的网络字节：0,192,168,10,17（5 字节）
+check(
+  '/0 默认路由：前缀后 0 个目的字节，仅 5 字节',
+  JSON.stringify(encodeRoute(0, 0, ipToInt('192.168.10.17'))) ===
+    JSON.stringify([0, 192, 168, 10, 17]),
+  JSON.stringify(encodeRoute(0, 0, ipToInt('192.168.10.17'))),
+)
+// /32 目的 10.0.0.1：写 4 个目的字节
+check(
+  '/32 编码：前缀 + 4 个目的字节 + 4 个下一跳字节',
+  JSON.stringify(encodeRoute(ipToInt('10.0.0.1'), 32, ipToInt('192.168.10.17'))) ===
+    JSON.stringify([32, 10, 0, 0, 1, 192, 168, 10, 17]),
+  JSON.stringify(encodeRoute(ipToInt('10.0.0.1'), 32, ipToInt('192.168.10.17'))),
+)
+// 非整字节边界 /17：ceil(17/8)=3 个目的字节
+check(
+  '/17 编码：ceil(17/8)=3 个目的字节',
+  JSON.stringify(encodeRoute(ipToInt('172.16.0.0'), 17, ipToInt('192.168.10.17'))) ===
+    JSON.stringify([17, 172, 16, 0, 192, 168, 10, 17]),
+  JSON.stringify(encodeRoute(ipToInt('172.16.0.0'), 17, ipToInt('192.168.10.17'))),
+)
+
+// 18b) resolveClientSegment：只接受成功分配的固定 / 自动网段
+const client = resolveClientSegment(hostPlan, 'q4')
+check('客户端网段解析为 q4（192.168.10.16/30）', client?.cidr === '192.168.10.16/30', client?.cidr ?? 'null')
+check('保留区 / 空闲段不能作为客户端网段', resolveClientSegment(hostPlan, 'r1') === null)
+check('空选择 / 已删除需求解析为 null', resolveClientSegment(hostPlan, '') === null && resolveClientSegment(hostPlan, 'nope') === null)
+
+// 18c) 完整生成：排序 = 前缀从长到短、网络地址升序；合并字节与配置行
+const opt = buildOption121(
+  [
+    { id: 'o1', destination: '0.0.0.0/0', gateway: '192.168.10.17' },
+    { id: 'o2', destination: '10.0.0.0/8', gateway: '192.168.10.18' },
+    { id: 'o3', destination: '192.168.1.0/24', gateway: '192.168.10.17' },
+  ],
+  client!,
+)
+check('三条合法路由无错误', opt.errors.length === 0, JSON.stringify(opt.errors))
+check(
+  '排序为 /24 -> /8 -> /0（长前缀优先）',
+  opt.routes.map((r) => r.destination).join(',') === '192.168.1.0/24,10.0.0.0/8,0.0.0.0/0',
+  opt.routes.map((r) => r.destination).join(','),
+)
+check('下发序保留录入序号信息（3,2,1）', opt.routes.map((r) => r.index).join(',') === '3,2,1')
+check(
+  '合并字节为三条 RFC 3442 记录拼接（8 + 6 + 5 = 19 字节）',
+  JSON.stringify(opt.bytes) ===
+    JSON.stringify([24, 192, 168, 1, 192, 168, 10, 17, 8, 10, 192, 168, 10, 18, 0, 192, 168, 10, 17]),
+  JSON.stringify(opt.bytes),
+)
+check(
+  'dhcp-option=121 配置行正确',
+  opt.optionLine ===
+    'dhcp-option=121,24,192,168,1,192,168,10,17,8,10,192,168,10,18,0,192,168,10,17',
+  opt.optionLine,
+)
+
+// 18d) 同前缀按网络地址升序
+const samePrefix = buildOption121(
+  [
+    { id: 'a', destination: '192.168.9.0/24', gateway: '192.168.10.17' },
+    { id: 'b', destination: '192.168.1.0/24', gateway: '192.168.10.17' },
+    { id: 'c', destination: '192.168.2.0/24', gateway: '192.168.10.17' },
+  ],
+  client!,
+)
+check(
+  '同前缀按网络地址升序（1 -> 2 -> 9）',
+  samePrefix.routes.map((r) => r.destination).join(',') ===
+    '192.168.1.0/24,192.168.2.0/24,192.168.9.0/24',
+  samePrefix.routes.map((r) => r.destination).join(','),
+)
+
+// 18e) 重复目的：第二条报错并定位序号，整体停止生成
+const dupDest = buildOption121(
+  [
+    { id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.17' },
+    { id: 'b', destination: '10.0.0.0/8', gateway: '192.168.10.18' },
+  ],
+  client!,
+)
+check('重复目的产生 1 条错误', dupDest.errors.length === 1, JSON.stringify(dupDest.errors))
+check(
+  '重复错误明确定位到第 2 条并指向第 1 条',
+  dupDest.errors[0].index === 2 && /第 2 条/.test(`第 ${dupDest.errors[0].index} 条`) && /第 1 条/.test(dupDest.errors[0].message),
+  JSON.stringify(dupDest.errors),
+)
+check('有错误时停止生成：routes/bytes/optionLine 均空', dupDest.routes.length === 0 && dupDest.bytes.length === 0 && dupDest.optionLine === '')
+// 不重复的第一条仍可逐行预览字节，重复的第二条无字节
+check('首条重复组仍逐行展示字节，重复行不展示', dupDest.rows[0].bytes !== null && dupDest.rows[1].bytes === null)
+
+// 18f) 目的非规范网络地址报错（parseCidr strictNetwork），并给出规范建议
+const nonCanonicalDest = buildOption121(
+  [{ id: 'a', destination: '192.168.1.5/24', gateway: '192.168.10.17' }],
+  client!,
+)
+check(
+  '非规范目的报错并提示 192.168.1.0/24',
+  nonCanonicalDest.errors.length === 1 && /192\.168\.1\.0\/24/.test(nonCanonicalDest.errors[0].message),
+  JSON.stringify(nonCanonicalDest.errors),
+)
+check('非规范目的不生成配置', nonCanonicalDest.optionLine === '')
+// 目的文本非法 / 前缀越界
+check(
+  '目的 IP 文本非法报错',
+  buildOption121([{ id: 'a', destination: '999.0.0.0/8', gateway: '192.168.10.17' }], client!).errors.length === 1,
+)
+check(
+  '前缀长度越界报错',
+  buildOption121([{ id: 'a', destination: '10.0.0.0/33', gateway: '192.168.10.17' }], client!).errors.length === 1,
+)
+
+// 18g) 下一跳必须是客户端网段内的可用主机地址
+check(
+  '下一跳为网络地址被拒绝',
+  /网络地址/.test(
+    buildOption121([{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.16' }], client!).errors[0]?.message ?? '',
+  ),
+)
+check(
+  '下一跳为广播地址被拒绝',
+  /广播地址/.test(
+    buildOption121([{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.19' }], client!).errors[0]?.message ?? '',
+  ),
+)
+check(
+  '下一跳越出客户端网段被拒绝并显示可用范围',
+  /不在客户端网段/.test(
+    buildOption121([{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.40' }], client!).errors[0]?.message ?? '',
+  ) &&
+    /192\.168\.10\.17 ~ 192\.168\.10\.18/.test(
+      buildOption121([{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.40' }], client!).errors[0]?.message ?? '',
+    ),
+)
+check(
+  '下一跳 IPv4 文本非法被拒绝',
+  buildOption121([{ id: 'a', destination: '10.0.0.0/8', gateway: '1.2.3' }], client!).errors.length === 1,
+)
+
+// 18h) 同一下一跳在不同客户端网段下结论不同：.17 在 q4(/30) 合法，在 q3(/27 32/27) 越界
+const q3client = resolveClientSegment(hostPlan, 'q3')!
+check(
+  'q3 网段接受 .33（其首个可用地址）',
+  buildOption121([{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.33' }], q3client).errors.length === 0,
+)
+check(
+  'q3 网段拒绝 .17（不在 32/27 内）',
+  buildOption121([{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.17' }], q3client).errors.length === 1,
+)
+
+// 18i) 缺字段逐一定位；空白行（占位）不参与校验
+const missing = buildOption121(
+  [
+    { id: 'a', destination: '', gateway: '192.168.10.17' },
+    { id: 'b', destination: '10.0.0.0/8', gateway: '' },
+    { id: 'c', destination: '   ', gateway: '' },
+  ],
+  client!,
+)
+check('缺字段产生 2 条错误（空白占位行跳过）', missing.errors.length === 2, JSON.stringify(missing.errors))
+check('错误序号按全部行位置定位（1、2）', missing.errors.map((e) => e.index).join(',') === '1,2')
+check('空白行标记 empty', missing.rows[2].empty === true)
+
+// 18j) 多条错误全部列出（整体停止生成但逐条定位）
+const multi = buildOption121(
+  [
+    { id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.17' },
+    { id: 'b', destination: 'bad/24', gateway: '192.168.10.18' },
+    { id: 'c', destination: '172.16.0.0/12', gateway: '8.8.8.8' },
+  ],
+  client!,
+)
+check('多条错误逐条列出（第 2、3 条）', multi.errors.length === 2 && multi.errors.map((e) => e.index).join(',') === '2,3', JSON.stringify(multi.errors))
+check('多条错误时不输出配置', multi.optionLine === '' && multi.routes.length === 0)
+// 第 1 条自身有效，逐行字节仍可预览
+check('错误并存时无误行仍逐行预览字节', multi.rows[0].bytes?.length === 6)
+
+// 18k) 空列表：无错误、无输出
+const emptyOpt = buildOption121([], client!)
+check('空列表无错误且 optionLine 为空串', emptyOpt.errors.length === 0 && emptyOpt.routes.length === 0 && emptyOpt.optionLine === '' && emptyOpt.bytes.length === 0)
+
+// 18l) 规划变化：客户端网段失效 -> resolveClientSegment 变 null（面板据此暂停结果），录入由上层按 ID 保留
+const opt121Migrated = plan({
+  parentCidr: '192.168.10.0/24',
+  reservations: [
+    { id: 'r1', name: '保留', cidr: '192.168.10.0/28' },
+    { id: 'r2', name: '链路保留', cidr: '192.168.10.16/30' },
+  ],
+  requirements: demo.requirements,
+})
+check('迁移后 q4 仍存在（改址到 20/30），客户端解析跟随新网段', resolveClientSegment(opt121Migrated, 'q4')?.cidr === '192.168.10.20/30', resolveClientSegment(opt121Migrated, 'q4')?.cidr ?? 'null')
+// 原录入下一跳 .17 在新网段 20/30（.21/.22）下自动重新校验为越界
+const revalidated = buildOption121(
+  [{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.17' }],
+  resolveClientSegment(opt121Migrated, 'q4')!,
+)
+check('规划变化后按原录入重新校验：.17 相对新网段失效', revalidated.errors.length === 1 && /不在客户端网段/.test(revalidated.errors[0].message))
+// 需求被删除后客户端网段彻底失效
+const q4Deleted = plan({
+  parentCidr: '192.168.10.0/24',
+  reservations: [{ id: 'r1', name: '保留', cidr: '192.168.10.0/28' }],
+  requirements: demo.requirements.filter((q) => q.id !== 'q4'),
+})
+check('客户端网段对应需求删除后解析为 null（结果暂停、录入保留）', resolveClientSegment(q4Deleted, 'q4') === null)
+
+// 18m) 每行十进制字节可独立读取（表格展示）
+check(
+  '行视图给出规范目的与点分下一跳',
+  opt.rows[2].destination === '192.168.1.0/24' &&
+    opt.rows[2].gatewayIp === '192.168.10.17' &&
+    JSON.stringify(opt.rows[2].bytes) === JSON.stringify([24, 192, 168, 1, 192, 168, 10, 17]),
+  JSON.stringify(opt.rows[2]),
+)
 
 console.log(failures === 0 ? '\n全部测试通过 ✅' : `\n${failures} 个测试失败 ❌`)
 process.exit(failures === 0 ? 0 : 1)

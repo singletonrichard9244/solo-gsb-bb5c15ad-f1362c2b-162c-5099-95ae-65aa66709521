@@ -178,3 +178,15 @@ export interface HostAssignment {
   /** 可选 MAC（小写冒号规范格式，如 aa:bb:cc:dd:ee:ff）；缺省表示未填写，不进入 dnsmasq 输出 */
   mac?: string
 }
+
+/* ---------- DHCP Option 121（RFC 3442 无分类静态路由） ---------- */
+
+/** 一条 Option 121 路由录入（仅随当前会话中的输入存在，不参与规划/基线/汇总/导出） */
+export interface Option121RouteInput {
+  /** 行内稳定 ID，规划变化后按它原样保留录入并重新校验 */
+  id: string
+  /** 目的 CIDR 文本，必须为规范网络地址，允许 0.0.0.0/0 */
+  destination: string
+  /** 下一跳 IPv4 文本，必须是客户端网段内的可用主机地址 */
+  gateway: string
+}

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import AddressBar from './components/AddressBar'
 import BaselinePanel from './components/BaselinePanel'
 import HostAddressPanel from './components/HostAddressPanel'
+import Option121Panel from './components/Option121Panel'
 import RouteSummaryPanel from './components/RouteSummaryPanel'
 import SegmentDetail from './components/SegmentDetail'
 import SegmentTable from './components/SegmentTable'
@@ -18,6 +19,7 @@ import { plan } from './lib/planner'
 import type {
   Baseline,
   HostAssignment,
+  Option121RouteInput,
   RequirementInput,
   ReservedInput,
 } from './lib/types'
@@ -48,6 +50,9 @@ export default function App() {
   const [baseline, setBaseline] = useState<Baseline | null>(() => loadBaseline())
   // 主机地址登记仅在当前会话内存中保留；与规划引擎、基线、汇总、导出完全解耦
   const [hostAssignments, setHostAssignments] = useState<HostAssignment[]>([])
+  // DHCP Option 121：客户端网段（需求稳定 ID）+ 路由录入（行内稳定 ID，规划变化后保留并重新校验）
+  const [option121ClientId, setOption121ClientId] = useState('')
+  const [option121Routes, setOption121Routes] = useState<Option121RouteInput[]>([])
 
   const result = useMemo(
     () => plan({ parentCidr, reservations, requirements }),
@@ -99,6 +104,8 @@ export default function App() {
     setRequirements(DEMO.requirements.map((r) => ({ ...r })))
     setSelectedIndex(null)
     setHostAssignments([])
+    setOption121ClientId('')
+    setOption121Routes([])
   }
 
   function clearAll() {
@@ -107,6 +114,8 @@ export default function App() {
     setRequirements([])
     setSelectedIndex(null)
     setHostAssignments([])
+    setOption121ClientId('')
+    setOption121Routes([])
   }
 
   const hasInput =
@@ -314,6 +323,14 @@ export default function App() {
         result={result}
         assignments={hostAssignments}
         onAssignmentsChange={setHostAssignments}
+      />
+
+      <Option121Panel
+        result={result}
+        clientId={option121ClientId}
+        routes={option121Routes}
+        onClientChange={setOption121ClientId}
+        onRoutesChange={setOption121Routes}
       />
 
       {result.segments.length > 0 && (

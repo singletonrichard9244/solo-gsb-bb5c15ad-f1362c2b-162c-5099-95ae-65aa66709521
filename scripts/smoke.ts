@@ -6,12 +6,13 @@ import {
   validateManualAddress,
 } from '../src/lib/hosts'
 import { buildDnsmasqLeases, dnsmasqLeasesText } from '../src/lib/dnsmasq'
+import { buildDhcpOption121, encodeClasslessRoute } from '../src/lib/dhcpOption121'
 import { checkMac, normalizeMacInput } from '../src/lib/mac'
 import { buildExportJson } from '../src/lib/exporter'
 import { intToIp, ipToInt, prefixForHosts } from '../src/lib/ip'
 import { plan } from '../src/lib/planner'
 import { blocksToCidrList, summarizeSegments } from '../src/lib/summary'
-import type { HostAssignment, PlannerInput, Segment } from '../src/lib/types'
+import type { DhcpRouteEntry, HostAssignment, PlannerInput, Segment } from '../src/lib/types'
 
 let failures = 0
 function check(name: string, cond: boolean, extra = '') {
@@ -935,6 +936,247 @@ check('重复 MAC 仅最早一条输出，另一条列入排除并说明重复',
 
 // 17f) MAC 数据不进入 JSON 导出
 check('导出 JSON 不含 MAC 字段', !/dhcp-host|mac地址|MAC地址/.test(exportJson) && !/"mac"/.test(buildExportJson(hostPlan, { parentCidr: demo.parentCidr })))
+
+// ========== 18) DHCP Option 121（RFC 3442 无类静态路由） ==========
+// 18a) 单条编码：前缀长度 + ceil(前缀/8) 个目的网络字节 + 4 个下一跳字节
+//  RFC 3442 §8 的三个示例（下一跳 192.168.111.180）
+check(
+  'RFC3442 /8 编码（只写 1 个目的字节）',
+  JSON.stringify(encodeClasslessRoute(ipToInt('10.0.0.0'), 8, ipToInt('192.168.111.180'))) ===
+    JSON.stringify([8, 10, 192, 168, 111, 180]),
+)
+check(
+  'RFC3442 /16 编码（写 2 个目的字节）',
+  JSON.stringify(encodeClasslessRoute(ipToInt('172.16.0.0'), 16, ipToInt('192.168.111.180'))) ===
+    JSON.stringify([16, 172, 16, 192, 168, 111, 180]),
+)
+check(
+  'RFC3442 /24 编码（写 3 个目的字节）',
+  JSON.stringify(encodeClasslessRoute(ipToInt('192.168.1.0'), 24, ipToInt('192.168.111.180'))) ===
+    JSON.stringify([24, 192, 168, 1, 192, 168, 111, 180]),
+)
+check(
+  '默认路由 0.0.0.0/0：仅前缀长度 0 + 4 下一跳字节（不写目的字节）',
+  JSON.stringify(encodeClasslessRoute(0, 0, ipToInt('192.168.111.180'))) ===
+    JSON.stringify([0, 192, 168, 111, 180]),
+)
+check(
+  '/32 写满 4 个目的字节',
+  JSON.stringify(encodeClasslessRoute(ipToInt('8.8.8.8'), 32, ipToInt('1.1.1.1'))) ===
+    JSON.stringify([32, 8, 8, 8, 8, 1, 1, 1, 1]),
+)
+check(
+  '非整字节前缀 /21 写 ceil(21/8)=3 个目的字节（第 3 字节为网络高位 8）',
+  JSON.stringify(encodeClasslessRoute(ipToInt('192.168.8.0'), 21, ipToInt('10.0.0.1'))) ===
+    JSON.stringify([21, 192, 168, 8, 10, 0, 0, 1]),
+)
+
+// 18b) 客户端网段候选仅为成功分配的固定 / 自动网段（与主机登记同源）
+const opt121Choices = buildDhcpOption121([], null, hostPlan).choices
+check(
+  'Option121 客户端候选只含固定/自动网段（4 个）',
+  opt121Choices.length === 4 &&
+    JSON.stringify(opt121Choices.map((c) => c.cidr)) ===
+      JSON.stringify(allocatableSegments(hostPlan).map((s) => s.cidr)),
+)
+
+// 18c) 录入顺序打乱 -> 按目的前缀从长到短、网络地址升序输出并合并为一行
+const opt121Entries: DhcpRouteEntry[] = [
+  { id: 'e1', destination: '0.0.0.0/0', gateway: '192.168.10.17' },
+  { id: 'e2', destination: '10.0.0.0/8', gateway: '192.168.10.18' },
+  { id: 'e3', destination: '172.16.1.0/24', gateway: '192.168.10.17' },
+  { id: 'e4', destination: '172.16.0.0/16', gateway: '192.168.10.18' },
+]
+const opt121 = buildDhcpOption121(opt121Entries, 'q4', hostPlan) // 客户端 192.168.10.16/30，可用 .17~.18
+check('合法录入可生成 Option 121', opt121.canGenerate && opt121.issues.length === 0)
+check(
+  '排序为 /24、/16、/8、/0（前缀从长到短）',
+  JSON.stringify(opt121.routes.map((r) => r.destination)) ===
+    JSON.stringify(['172.16.1.0/24', '172.16.0.0/16', '10.0.0.0/8', '0.0.0.0/0']),
+  JSON.stringify(opt121.routes.map((r) => r.destination)),
+)
+check(
+  '合并后的 dhcp-option=121 行字节正确',
+  opt121.optionLine ===
+    'dhcp-option=121,' +
+      '24,172,16,1,192,168,10,17,' +
+      '16,172,16,192,168,10,18,' +
+      '8,10,192,168,10,18,' +
+      '0,192,168,10,17',
+  opt121.optionLine,
+)
+check('每条字节数 = 1 + ceil(P/8) + 4', opt121.routes.map((r) => r.bytes.length).join(',') === '8,7,6,5')
+check(
+  '合并字节总数 = 各条之和',
+  opt121.bytes.length === opt121.routes.reduce((n, r) => n + r.bytes.length, 0),
+)
+// 同前缀按网络地址升序
+const samePrefix = buildDhcpOption121(
+  [
+    { id: 'a', destination: '192.168.9.0/24', gateway: '192.168.10.17' },
+    { id: 'b', destination: '192.168.1.0/24', gateway: '192.168.10.18' },
+  ],
+  'q4',
+  hostPlan,
+)
+check(
+  '同前缀按网络地址升序（1.0/24 在 9.0/24 前）',
+  JSON.stringify(samePrefix.routes.map((r) => r.destination)) ===
+    JSON.stringify(['192.168.1.0/24', '192.168.9.0/24']),
+)
+
+// 18d) 下一跳必须是客户端网段内的可用主机地址
+check(
+  '拒绝网络地址作为下一跳',
+  buildDhcpOption121([{ id: 'x', destination: '10.0.0.0/8', gateway: '192.168.10.16' }], 'q4', hostPlan)
+    .issues.some((i) => /网络地址/.test(i.message)),
+)
+check(
+  '拒绝广播地址作为下一跳',
+  buildDhcpOption121([{ id: 'x', destination: '10.0.0.0/8', gateway: '192.168.10.19' }], 'q4', hostPlan)
+    .issues.some((i) => /广播地址/.test(i.message)),
+)
+check(
+  '拒绝客户端网段外的下一跳（含父网段内其他网段地址）',
+  buildDhcpOption121([{ id: 'x', destination: '10.0.0.0/8', gateway: '192.168.10.33' }], 'q4', hostPlan)
+    .issues.some((i) => /不在客户端网段/.test(i.message)),
+)
+check(
+  '拒绝非法 IPv4 下一跳',
+  buildDhcpOption121([{ id: 'x', destination: '10.0.0.0/8', gateway: '999.1.1.1' }], 'q4', hostPlan)
+    .issues.some((i) => /不是合法的 IPv4/.test(i.message)),
+)
+check(
+  '同一地址在另一个客户端网段（q1=128/25）内则合法：校验以所选客户端网段为准',
+  buildDhcpOption121([{ id: 'x', destination: '10.0.0.0/8', gateway: '192.168.10.200' }], 'q1', hostPlan)
+    .canGenerate,
+)
+
+// 18e) 目的必须为规范网络地址，允许 0.0.0.0/0
+check(
+  '拒绝非规范目的并提示规范写法',
+  buildDhcpOption121([{ id: 'x', destination: '10.1.2.3/8', gateway: '192.168.10.17' }], 'q4', hostPlan)
+    .issues.some((i) => /10\.0\.0\.0\/8/.test(i.message)),
+)
+check(
+  '拒绝非法前缀（/40）',
+  buildDhcpOption121([{ id: 'x', destination: '10.0.0.0/40', gateway: '192.168.10.17' }], 'q4', hostPlan)
+    .issues.some((i) => /前缀长度无效/.test(i.message)),
+)
+check(
+  '允许 0.0.0.0/0 作为目的',
+  buildDhcpOption121([{ id: 'x', destination: '0.0.0.0/0', gateway: '192.168.10.17' }], 'q4', hostPlan)
+    .canGenerate,
+)
+
+// 18f) 重复目的 / 任一无效 -> 整体停止生成并定位到行
+const optDup = buildDhcpOption121(
+  [
+    { id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.17' },
+    { id: 'b', destination: '10.0.0.0/8', gateway: '192.168.10.18' },
+  ],
+  'q4',
+  hostPlan,
+)
+check(
+  '重复目的停止生成并定位到后录入行',
+  !optDup.canGenerate &&
+    optDup.issues.some((i) => i.rowId === 'b' && i.field === 'destination' && /重复/.test(i.message)),
+)
+const optMixed = buildDhcpOption121(
+  [
+    { id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.17' },
+    { id: 'b', destination: '10.0.0.0/40', gateway: '192.168.10.18' },
+  ],
+  'q4',
+  hostPlan,
+)
+check('任一条目无效则整体无输出（optionLine 为空）', !optMixed.canGenerate && optMixed.optionLine === '')
+check(
+  '缺目的或缺下一跳分别报错',
+  buildDhcpOption121([{ id: 'a', destination: '', gateway: '192.168.10.17' }], 'q4', hostPlan).issues.some(
+    (i) => /缺少目的/.test(i.message),
+  ) &&
+    buildDhcpOption121([{ id: 'a', destination: '10.0.0.0/8', gateway: '' }], 'q4', hostPlan).issues.some(
+      (i) => /缺少下一跳/.test(i.message),
+    ),
+)
+check(
+  '完全空白行不参与、不报错',
+  (() => {
+    const w = buildDhcpOption121(
+      [
+        { id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.17' },
+        { id: 'b', destination: '', gateway: '' },
+      ],
+      'q4',
+      hostPlan,
+    )
+    return w.canGenerate && w.filledCount === 1 && w.routes.length === 1
+  })(),
+)
+
+// 18g) 未选客户端 / 网段失效 / 规划非法 -> 暂停结果但保留录入
+const optNoClient = buildDhcpOption121(opt121Entries, null, hostPlan)
+check('未选客户端网段时暂停并提示', !optNoClient.canGenerate && /选择一个客户端网段/.test(optNoClient.pauseReason ?? ''))
+const optGone = buildDhcpOption121(opt121Entries, 'q999', hostPlan)
+check(
+  '客户端网段失效（需求删除/分配失败）时暂停结果、条目保留且不报越界',
+  !optGone.canGenerate &&
+    /已失效/.test(optGone.pauseReason ?? '') &&
+    optGone.rows.length === 4 &&
+    optGone.issues.length === 0,
+)
+const optBadPlan = plan({ parentCidr: '192.168.99.1/24', reservations: [], requirements: [] })
+check(
+  '规划输入非法时暂停 Option 121',
+  !buildDhcpOption121(opt121Entries, 'q1', optBadPlan).canGenerate &&
+    /输入非法/.test(buildDhcpOption121(opt121Entries, 'q1', optBadPlan).pauseReason ?? ''),
+)
+check(
+  '没有成功分配网段时暂停',
+  !buildDhcpOption121(opt121Entries, null, rb).canGenerate && // rb：父 /30、唯一需求失败
+    buildDhcpOption121(opt121Entries, null, rb).choices.length === 0,
+)
+
+// 18h) 规划变化后按稳定 ID 保留并重新校验：q4 从 16/30 迁到 20/30，原下一跳 .17 变越界
+const opt121Migrated = buildDhcpOption121(
+  [{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.17' }],
+  'q4',
+  migratedPlan,
+)
+check(
+  '网段迁移后录入原样保留、下一跳重新校验为越界并停止生成',
+  opt121Migrated.rows[0].entry.gateway === '192.168.10.17' &&
+    !opt121Migrated.canGenerate &&
+    opt121Migrated.issues.some((i) => /不在客户端网段/.test(i.message)),
+)
+// 迁移后把下一跳改为新网段可用地址 .21 即恢复生成
+check(
+  '下一跳改为新网段可用地址后恢复生成（稳定行 ID 不变）',
+  buildDhcpOption121(
+    [{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.21' }],
+    'q4',
+    migratedPlan,
+  ).canGenerate,
+)
+// 同一客户端需求重新成功分配时自动恢复
+check(
+  '同 ID 客户端在重新成功分配后自动恢复生成',
+  buildDhcpOption121([{ id: 'a', destination: '10.0.0.0/8', gateway: '192.168.10.17' }], 'q4', plan(demo))
+    .canGenerate,
+)
+
+// 18i) 隔离性：Option 121 录入不影响规划、基线、路由汇总、主机登记与导出
+check(
+  'Option121 不改变规划结果',
+  JSON.stringify(plan(demo)) === JSON.stringify(plan(demo)),
+)
+check(
+  '导出 JSON 不含 Option 121 数据',
+  !/dhcp-option|option 121|121/i.test(buildExportJson(hostPlan, { parentCidr: demo.parentCidr })),
+)
+check('Option121 不影响路由汇总', summarizeSegments(allocatableSegments(hostPlan)).totalAddresses === 228)
 
 console.log(failures === 0 ? '\n全部测试通过 ✅' : `\n${failures} 个测试失败 ❌`)
 process.exit(failures === 0 ? 0 : 1)

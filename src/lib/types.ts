@@ -178,3 +178,14 @@ export interface HostAssignment {
   /** 可选 MAC（小写冒号规范格式，如 aa:bb:cc:dd:ee:ff）；缺省表示未填写，不进入 dnsmasq 输出 */
   mac?: string
 }
+
+/* ---------- DHCP Option 121（RFC 3442 无类静态路由） ---------- */
+
+/** 一条「目的 CIDR -> 下一跳 IPv4」录入（仅随当前会话内存存在，不参与规划/基线/汇总/导出） */
+export interface DhcpRouteEntry {
+  id: string
+  /** 目的 CIDR 原文，如 192.168.1.0/24；必须为规范网络地址，允许 0.0.0.0/0 */
+  destination: string
+  /** 下一跳 IPv4 原文，必须是客户端网段内的可用主机地址 */
+  gateway: string
+}

@@ -1062,3 +1062,138 @@ button.host-mac-edit:hover {
   margin: 0 0 8px;
   color: #fca5a5;
 }
+
+/* ---------- DHCP Option 121 ---------- */
+.dhcp-panel {
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+.dhcp-client-row {
+  margin-bottom: 12px;
+}
+
+.dhcp-client-select {
+  width: 100%;
+  max-width: 640px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.dhcp-client-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dhcp-client-select option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.dhcp-client-meta {
+  display: inline-block;
+  margin-left: 12px;
+  font-size: 12px;
+  color: var(--auto);
+}
+
+.dhcp-client-gone {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.dhcp-error-list {
+  margin: 8px 0 12px;
+}
+
+.dhcp-route-head,
+.dhcp-route-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1.25fr) minmax(0, 1.1fr) minmax(0, 1.5fr) 36px;
+  gap: 8px;
+  align-items: center;
+}
+
+.dhcp-route-head {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.dhcp-route-row {
+  margin-bottom: 8px;
+}
+
+.dhcp-col-no {
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dhcp-col-del {
+  text-align: center;
+}
+
+.dhcp-col-del button.icon {
+  width: 100%;
+}
+
+.dhcp-col-status {
+  font-size: 11px;
+  min-width: 0;
+}
+
+.dhcp-bytes {
+  display: inline-block;
+  font-size: 11px;
+  color: #7dd3fc;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 7px;
+  word-break: break-all;
+  white-space: normal;
+  line-height: 1.6;
+}
+
+.dhcp-status-pending {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+input.is-invalid {
+  border-color: var(--danger);
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.dhcp-result-box {
+  margin-top: 14px;
+  border-color: rgba(52, 211, 153, 0.4);
+}
+
+.dhcp-route-table td {
+  white-space: normal;
+  vertical-align: middle;
+}
+
+.dhcp-route-table .dhcp-bytes {
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .dhcp-route-head,
+  .dhcp-route-row {
+    grid-template-columns: 28px minmax(0, 1fr) minmax(0, 1fr) 32px;
+  }
+
+  .dhcp-route-head .dhcp-col-status,
+  .dhcp-route-row .dhcp-col-status {
+    grid-column: 2 / 4;
+  }
+}

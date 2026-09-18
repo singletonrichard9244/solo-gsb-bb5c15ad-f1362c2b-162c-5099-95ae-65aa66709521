@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import AddressBar from './components/AddressBar'
 import BaselinePanel from './components/BaselinePanel'
+import DhcpOption121Panel from './components/DhcpOption121Panel'
 import HostAddressPanel from './components/HostAddressPanel'
 import RouteSummaryPanel from './components/RouteSummaryPanel'
 import SegmentDetail from './components/SegmentDetail'
@@ -17,6 +18,7 @@ import { downloadJson } from './lib/exporter'
 import { plan } from './lib/planner'
 import type {
   Baseline,
+  DhcpRouteEntry,
   HostAssignment,
   RequirementInput,
   ReservedInput,
@@ -48,6 +50,9 @@ export default function App() {
   const [baseline, setBaseline] = useState<Baseline | null>(() => loadBaseline())
   // 主机地址登记仅在当前会话内存中保留；与规划引擎、基线、汇总、导出完全解耦
   const [hostAssignments, setHostAssignments] = useState<HostAssignment[]>([])
+  // DHCP Option 121 面板状态（同样仅当前会话内存）：客户端网段按需求稳定 ID 关联，条目按稳定行 ID 保留
+  const [dhcpClientOwnerId, setDhcpClientOwnerId] = useState<string | null>(null)
+  const [dhcpRoutes, setDhcpRoutes] = useState<DhcpRouteEntry[]>([])
 
   const result = useMemo(
     () => plan({ parentCidr, reservations, requirements }),
@@ -99,6 +104,8 @@ export default function App() {
     setRequirements(DEMO.requirements.map((r) => ({ ...r })))
     setSelectedIndex(null)
     setHostAssignments([])
+    setDhcpClientOwnerId(null)
+    setDhcpRoutes([])
   }
 
   function clearAll() {
@@ -107,6 +114,8 @@ export default function App() {
     setRequirements([])
     setSelectedIndex(null)
     setHostAssignments([])
+    setDhcpClientOwnerId(null)
+    setDhcpRoutes([])
   }
 
   const hasInput =
@@ -314,6 +323,14 @@ export default function App() {
         result={result}
         assignments={hostAssignments}
         onAssignmentsChange={setHostAssignments}
+      />
+
+      <DhcpOption121Panel
+        result={result}
+        entries={dhcpRoutes}
+        clientOwnerId={dhcpClientOwnerId}
+        onEntriesChange={setDhcpRoutes}
+        onClientChange={setDhcpClientOwnerId}
       />
 
       {result.segments.length > 0 && (
